@@ -22,14 +22,15 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 import chainlit as cl
 from typing import Optional
 import transactiondb
-import documentqa
+import UiPathQueueTracker
+#import documentqa
     
 load_dotenv()
 
 client = AsyncOpenAI()
 
 localdb = transactiondb.TransactionDB()
-pdfqa = documentqa.PdfQA()
+#pdfqa = documentqa.PdfQA()
 # Instrument the OpenAI client
 #cl.instrument_openai()
 
@@ -53,18 +54,35 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 @cl.password_auth_callback
 def auth_callback(username: str, password: str) -> Optional[cl.User]:
     '''auth_callback with username and password'''
+    print( f'userid: {username} and password: {password}')
     match = localdb.authenticate( username, password)
     if match: # match ( userid, password, display_name, role) 
         config['configurable']['session_id'] = match[0] # user_id display_name
+        '''
+        with_message_history.invoke( 
+                        {"messages": [HumanMessage(f"저의 사용자 ID는 {username} 입니다.")]},
+                        config=config,
+                    )
+        '''
         return cl.User(identifier=match[1], metadata={"role": "USER"})
     else:
         return None
 
 @tool
-def check_post_delivery (reg_no: str) -> str:
+def check_post_delivery (postNum: str) -> str:
     """등기번호 등기 배송 상태  조회 """
-    print(f'등기번호: {reg_no}')
-    return "LangChain"
+    print(f'등기번호: {postNum}')
+    args = {
+        'name': 'ToolCallingQ',
+        'folder': { 'Id': 1493557, 'Name': 'Shared'},
+        'reference': 'PostOffice',
+        'item': {
+            'postNum': '1111360334160'
+        }
+    }
+    tracker = UiPathQueueTracker.UiPathQueueTracker(kwargs=args)
+    tracker.start()
+    return tracker.join()
 
 @tool 
 def lookup_user_request( userid: str ) -> str:
@@ -73,7 +91,7 @@ def lookup_user_request( userid: str ) -> str:
     return localdb.list_requests(userid)
 
 tools = [ check_post_delivery, lookup_user_request]
-llm = ChatOpenAI(model="gpt-3.5-turbo-1106", temperature=0, streaming=True)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=True)
 llm = llm.bind_tools(tools)
 
 # Get the prompt to use - you can modify this!
@@ -85,48 +103,43 @@ config = {"configurable": {"session_id": None}}
 
 with_message_history = RunnableWithMessageHistory(chain, get_session_history)
 
-
-message_history = ChatMessageHistory()
-memory = ConversationBufferMemory(
-    memory_key="chat_history",
-    output_key="answer",
-    chat_memory=message_history,
-    return_messages=True,
-)
-
+mymsgs= []
     
 @cl.on_message
 async def on_message(message: cl.Message):
+    continue_flag = True
     mycontent= message.content
-    mymsgs = [HumanMessage(content=mycontent)]
-    while True:
-        response = with_message_history.invoke( 
-            {"messages": mymsgs},
-            config=config,
-        )
-        print( response.response_metadata, response.tool_calls) 
+    mymsgs.append(HumanMessage(content=mycontent))
+    while continue_flag:
+        response = chain.invoke( mymsgs)
+        print( "Response: " , response.response_metadata, response.tool_calls) 
         if response.tool_calls:
             mymsgs.append( response)
             for tcall in response.tool_calls:
                 if tcall['name'] == 'lookup_user_request':
                     tcall['args']['userid'] = config['configurable']['session_id']
-                    result = lookup_user_request.invoke( tcall)
-                    print(result)
+                    result = lookup_user_request.invoke(tcall)
+                    print("tool_calls_response: ", result)
                     #toolmsg = [ ToolMessage(content=result, name=tcall['name'],tool_call_id=tcall['id'] )]
                     mymsgs.append(result)
-                    response = with_message_history.invoke( 
-                        {"messages": mymsgs},
-                        config=config,
-                    )
+                    response = chain.invoke( mymsgs)
+                    await cl.Message( content=response.content).send()
+                elif tcall['name'] == 'check_post_delivery':
+                    result = check_post_delivery.invoke( tcall)
+                    print("tool_calls_response: ", result)
+                    mymsgs.append( result)
+                    response = chain.invoke( mymsgs)
+                    await cl.Message( content=response.content).send()
+            continue_flag = False 
         else:
             await cl.Message(content=response.content).send()
-            break
-
+            continue_flag = False 
 
 
 @cl.on_chat_start
 async def on_chat_start():
     print('on_chat_start')
+    mymsgs.clear()
     cl.user_session.set("doc", None)
     if config['configurable']['session_id']: 
         await cl.Message(
@@ -134,13 +147,20 @@ async def on_chat_start():
         ).send()
     else:
         await cl.Message( 
-            content="안녕하세요"
+            content="안녕하세요. 로그 아웃후 다시 로그인 부탁드립니다."
         ).send()
         
     
 @cl.on_logout
 def on_logout(request: Request, response: Response):
     print('on_logout') 
+    mymsgs.clear()
     print(response.raw_headers)
     config['configurable']['session_id'] = None
     response.delete_cookie("my_cookie")
+    
+    
+    
+if __name__ == '__main__':
+    from chainlit.cli import run_chainlit
+    run_chainlit(__file__)
