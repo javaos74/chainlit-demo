@@ -22,7 +22,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 import chainlit as cl
 from typing import Optional
 import transactiondb
-import UiPathQueueTracker
+import uipathlib
 #import documentqa
     
 load_dotenv()
@@ -77,10 +77,10 @@ def check_post_delivery (postNum: str) -> str:
         'folder': { 'Id': 1493557, 'Name': 'Shared'},
         'reference': 'PostOffice',
         'item': {
-            'postNum': '1111360334160'
+            'postNum': postNum
         }
     }
-    tracker = UiPathQueueTracker.UiPathQueueTracker(kwargs=args)
+    tracker = uipathlib.UiPathQueueTracker(kwargs=args)
     tracker.start()
     return tracker.join()
 
@@ -91,7 +91,7 @@ def lookup_user_request( userid: str ) -> str:
     return localdb.list_requests(userid)
 
 tools = [ check_post_delivery, lookup_user_request]
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, streaming=True)
+llm = ChatOpenAI(model="gpt-4o", temperature=0, streaming=True)
 llm = llm.bind_tools(tools)
 
 # Get the prompt to use - you can modify this!
@@ -124,12 +124,15 @@ async def on_message(message: cl.Message):
                     mymsgs.append(result)
                     response = chain.invoke( mymsgs)
                     await cl.Message( content=response.content).send()
+                    #mymsgs.remove( result)
                 elif tcall['name'] == 'check_post_delivery':
                     result = check_post_delivery.invoke( tcall)
                     print("tool_calls_response: ", result)
+                    print(mymsgs)
                     mymsgs.append( result)
                     response = chain.invoke( mymsgs)
                     await cl.Message( content=response.content).send()
+                    #mymsgs.remove(result)
             continue_flag = False 
         else:
             await cl.Message(content=response.content).send()
